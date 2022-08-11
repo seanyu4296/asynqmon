@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/hibiken/asynq"
 	"github.com/hibiken/asynq/x/metrics"
 	"github.com/hibiken/asynqmon"
@@ -92,43 +92,73 @@ func makeTLSConfig(cfg *Config) *tls.Config {
 }
 
 func makeRedisConnOpt(cfg *Config) (asynq.RedisConnOpt, error) {
-	// Connecting to redis-cluster
-	if len(cfg.RedisClusterNodes) > 0 {
-		return asynq.RedisClusterClientOpt{
-			Addrs:     strings.Split(cfg.RedisClusterNodes, ","),
-			Password:  cfg.RedisPassword,
-			TLSConfig: makeTLSConfig(cfg),
-		}, nil
+	res, err := redis.ParseURL(os.Getenv("REDIS_URL"))
+	if err != nil {
+		log.Fatal(err)
 	}
+	res.Password = os.Getenv("REDIS_PASSWORD")
+	res.TLSConfig = &tls.Config{
+		// Set InsecureSkipVerify to skip the default validation we are
+		// replacing. This will not disable VerifyPeerCertificate.
+		InsecureSkipVerify: true,
 
-	// Connecting to redis-sentinels
-	if strings.HasPrefix(cfg.RedisURL, "redis-sentinel") {
-		res, err := asynq.ParseRedisURI(cfg.RedisURL)
-		if err != nil {
-			return nil, err
-		}
-		connOpt := res.(asynq.RedisFailoverClientOpt) // safe to type-assert
-		connOpt.TLSConfig = makeTLSConfig(cfg)
-		return connOpt, nil
-	}
+		// While packages like net/http will implicitly set ServerName, the
+		// VerifyPeerCertificate callback can't access that value, so it has to be set
+		// explicitly here or in VerifyPeerCertificate on the client side. If in
+		// an http.Transport DialTLS callback, this can be obtained by passing
+		// the addr argument to net.SplitHostPort.
+		ServerName: res.TLSConfig.ServerName,
 
-	// Connecting to single redis server
-	var connOpt asynq.RedisClientOpt
-	if len(cfg.RedisURL) > 0 {
-		res, err := asynq.ParseRedisURI(cfg.RedisURL)
-		if err != nil {
-			return nil, err
-		}
-		connOpt = res.(asynq.RedisClientOpt) // safe to type-assert
-	} else {
-		connOpt.Addr = cfg.RedisAddr
-		connOpt.DB = cfg.RedisDB
-		connOpt.Password = cfg.RedisPassword
+		// On the server side, set ClientAuth to require client certificates (or
+		// VerifyPeerCertificate will run anyway and panic accessing certs[0])
+		// but not verify them with the default verifier.
+		ClientAuth: tls.RequireAnyClientCert,
 	}
-	if connOpt.TLSConfig == nil {
-		connOpt.TLSConfig = makeTLSConfig(cfg)
+	redisConnOpt := asynq.RedisClientOpt{
+		Addr:      res.Addr,
+		DB:        res.DB,
+		Password:  res.Password,
+		TLSConfig: res.TLSConfig,
 	}
-	return connOpt, nil
+	return redisConnOpt, nil
+
+	// // Connecting to redis-cluster
+	// if len(cfg.RedisClusterNodes) > 0 {
+	// 	return asynq.RedisClusterClientOpt{
+	// 		Addrs:     strings.Split(cfg.RedisClusterNodes, ","),
+	// 		Password:  cfg.RedisPassword,
+	// 		TLSConfig: makeTLSConfig(cfg),
+	// 	}, nil
+	// }
+
+	// // Connecting to redis-sentinels
+	// if strings.HasPrefix(cfg.RedisURL, "redis-sentinel") {
+	// 	res, err := asynq.ParseRedisURI(cfg.RedisURL)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	connOpt := res.(asynq.RedisFailoverClientOpt) // safe to type-assert
+	// 	connOpt.TLSConfig = makeTLSConfig(cfg)
+	// 	return connOpt, nil
+	// }
+
+	// // Connecting to single redis server
+	// var connOpt asynq.RedisClientOpt
+	// if len(cfg.RedisURL) > 0 {
+	// 	res, err := asynq.ParseRedisURI(cfg.RedisURL)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	connOpt = res.(asynq.RedisClientOpt) // safe to type-assert
+	// } else {
+	// 	connOpt.Addr = cfg.RedisAddr
+	// 	connOpt.DB = cfg.RedisDB
+	// 	connOpt.Password = cfg.RedisPassword
+	// }
+	// if connOpt.TLSConfig == nil {
+	// 	connOpt.TLSConfig = makeTLSConfig(cfg)
+	// }
+	// return connOpt, nil
 }
 
 func main() {
